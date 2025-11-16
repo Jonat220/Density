@@ -4,7 +4,7 @@ A Streamlit app that counts OpenStreetMap buildings within a radius, computes de
 
 ## Run
 ```powershell
-cd C:\Users\baahj\Density
+cd D:\Density
 .\.venv\Scripts\activate
 python -m pip install -r requirements.txt
 python -m streamlit run app.py
