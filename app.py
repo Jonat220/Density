@@ -7,6 +7,7 @@ from typing import List, Tuple, Dict, Any, Optional
 
 import streamlit as st
 import requests
+import pandas as pd
 from geopy.geocoders import Nominatim
 from shapely.geometry import Polygon, LineString, Point
 from shapely.ops import unary_union
@@ -1087,14 +1088,45 @@ def main() -> None:
 		query_btn = st.button("Calculate", type="primary")
 
 	# Determine center for live map based on current inputs
+	# Geocode address or parse coordinates BEFORE showing map for user confirmation
 	center_lat, center_lon = lat, lon
 	radius_m_from_inputs = kilometers_to_meters(radius_value) if units == "kilometers" else miles_to_meters(radius_value)
 	
-	# Only geocode when Calculate button is pressed, not on every input change
-	# This prevents unnecessary API calls and improves performance
+	# Geocode address or parse coordinates for preview map (before calculation)
+	preview_location_resolved = False
+	if input_mode == "Address" and address.strip():
+		# First, attempt to parse raw coordinates like "lat, lon"
+		parsed_coords = parse_lat_lon_from_string(address)
+		if parsed_coords is not None:
+			center_lat, center_lon = parsed_coords
+			preview_location_resolved = True
+		else:
+			# Try geocoding for preview (with error handling)
+			try:
+				center_lat, center_lon = geocode_location(address)
+				preview_location_resolved = True
+			except Exception:
+				# If geocoding fails, keep default/previous coordinates
+				# User will see error when they click Calculate
+				preview_location_resolved = False
+	elif input_mode == "Coordinates":
+		# Validate coordinates are within range
+		if -90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0:
+			center_lat, center_lon = lat, lon
+			preview_location_resolved = True
+		else:
+			preview_location_resolved = False
 
 	# Render live map (updates as inputs change). Overlays will be added after calculation.
-	st.subheader("Map")
+	st.subheader("Map Preview")
+	if preview_location_resolved:
+		st.info(f"📍 Location: {center_lat:.6f}, {center_lon:.6f}" + (f" (from: {address})" if input_mode == "Address" and address.strip() else ""))
+	else:
+		if input_mode == "Address" and address.strip():
+			st.warning("⚠️ Address not yet resolved. Enter a valid address or coordinates to see the location on the map.")
+		else:
+			st.info("📍 Enter an address or coordinates to see the location on the map.")
+	
 	polygons_to_show: List[Polygon] = []
 	# Keep overlays after reruns if we have a previous calculation
 	if "calc" in st.session_state and isinstance(st.session_state["calc"], dict):
@@ -1201,168 +1233,121 @@ def main() -> None:
 				st.markdown("<div class='card'>", unsafe_allow_html=True)
 				st.subheader("🏢 Building Analysis Results")
 				
-				# Basic building metrics
-				col1, col2, col3 = st.columns(3)
-				with col1:
-					st.metric("Buildings Found", f"{_saved['num_buildings']}")
-				with col2:
-					st.metric("Density (per km²)", f"{_saved['stats']['per_sq_km']:.1f}")
-				with col3:
-					st.metric("Density (per mi²)", f"{_saved['stats']['per_sq_mile']:.1f}")
+				# Collect all metrics into a grid format
+				results_data = []
 				
-				st.write(f"**Search area**: {_saved['stats']['area_sq_km']:.3f} sq km ({_saved['stats']['area_sq_miles']:.3f} sq mi)")
+				# Basic building metrics
+				results_data.append({"Category": "Building Analysis", "Metric": "Buildings Found", "Value": f"{_saved['num_buildings']}", "Unit": ""})
+				results_data.append({"Category": "Building Analysis", "Metric": "Density (per km²)", "Value": f"{_saved['stats']['per_sq_km']:.1f}", "Unit": "buildings/km²"})
+				results_data.append({"Category": "Building Analysis", "Metric": "Density (per mi²)", "Value": f"{_saved['stats']['per_sq_mile']:.1f}", "Unit": "buildings/mi²"})
+				results_data.append({"Category": "Building Analysis", "Metric": "Search Area", "Value": f"{_saved['stats']['area_sq_km']:.3f}", "Unit": "sq km"})
+				results_data.append({"Category": "Building Analysis", "Metric": "Search Area", "Value": f"{_saved['stats']['area_sq_miles']:.3f}", "Unit": "sq mi"})
 				
 				# Roof area analysis
-				st.markdown("---")
-				st.subheader("🏠 Roof Area Analysis")
 				roof_stats = _saved.get('roof_area_stats', {})
 				if roof_stats.get('buildings_analyzed', 0) > 0:
-					col1, col2 = st.columns(2)
-					with col1:
-						st.metric("Total Roof Area", f"{roof_stats['total_area_km2']:.4f} km²")
-						st.metric("Average Building Area", f"{roof_stats['average_area_m2']:.1f} m²")
-					with col2:
-						st.metric("Total Roof Area", f"{roof_stats['total_area_m2']:.0f} m²")
-						st.metric("Buildings Analyzed", f"{roof_stats['buildings_analyzed']}")
+					results_data.append({"Category": "Roof Area Analysis", "Metric": "Total Roof Area", "Value": f"{roof_stats['total_area_km2']:.4f}", "Unit": "km²"})
+					results_data.append({"Category": "Roof Area Analysis", "Metric": "Total Roof Area", "Value": f"{roof_stats['total_area_m2']:.0f}", "Unit": "m²"})
+					results_data.append({"Category": "Roof Area Analysis", "Metric": "Average Building Area", "Value": f"{roof_stats['average_area_m2']:.1f}", "Unit": "m²"})
+					results_data.append({"Category": "Roof Area Analysis", "Metric": "Buildings Analyzed", "Value": f"{roof_stats['buildings_analyzed']}", "Unit": ""})
 				else:
-					st.warning("No roof area data available")
+					results_data.append({"Category": "Roof Area Analysis", "Metric": "Status", "Value": "No roof area data available", "Unit": ""})
 				
 				# Total height analysis
-				st.markdown("---")
-				st.subheader("📏 Total Building Height")
 				total_height_stats = _saved.get('total_height_stats', {})
 				if total_height_stats.get('buildings_with_height', 0) > 0:
-					col1, col2 = st.columns(2)
-					with col1:
-						st.metric("Total Height", f"{total_height_stats['total_height_m']:.0f} m")
-						st.metric("Total Height", f"{total_height_stats['total_height_km']:.3f} km")
-					with col2:
-						st.metric("Average Height", f"{total_height_stats['average_height_m']:.1f} m")
-						st.metric("Buildings with Height", f"{total_height_stats['buildings_with_height']}")
+					results_data.append({"Category": "Total Building Height", "Metric": "Total Height", "Value": f"{total_height_stats['total_height_m']:.0f}", "Unit": "m"})
+					results_data.append({"Category": "Total Building Height", "Metric": "Total Height", "Value": f"{total_height_stats['total_height_km']:.3f}", "Unit": "km"})
+					results_data.append({"Category": "Total Building Height", "Metric": "Average Height", "Value": f"{total_height_stats['average_height_m']:.1f}", "Unit": "m"})
+					results_data.append({"Category": "Total Building Height", "Metric": "Buildings with Height", "Value": f"{total_height_stats['buildings_with_height']}", "Unit": ""})
 				else:
-					st.warning("No height data available for total calculations")
+					results_data.append({"Category": "Total Building Height", "Metric": "Status", "Value": "No height data available for total calculations", "Unit": ""})
 				
 				# Infrastructure analysis
-				st.markdown("---")
-				st.subheader("🛣️ Road & Infrastructure Analysis")
 				infra_stats = _saved.get('infrastructure_stats', {})
-				
 				if infra_stats:
-					# Road statistics
 					road_stats = infra_stats.get('roads', {})
 					tiled_roads = road_stats.get('tiled', {})
 					untiled_roads = road_stats.get('untiled', {})
 					
-					st.markdown("**📍 Roads**")
-					col1, col2 = st.columns(2)
-					with col1:
-						st.markdown("*Tiled/Paved Roads*")
-						st.metric("Length", f"{tiled_roads.get('total_length_km', 0):.2f} km")
-						st.metric("Area", f"{tiled_roads.get('total_area_km2', 0):.4f} km²")
-						st.metric("Count", f"{tiled_roads.get('count', 0)}")
-					with col2:
-						st.markdown("*Untiled/Unpaved Roads*")
-						st.metric("Length", f"{untiled_roads.get('total_length_km', 0):.2f} km")
-						st.metric("Area", f"{untiled_roads.get('total_area_km2', 0):.4f} km²")
-						st.metric("Count", f"{untiled_roads.get('count', 0)}")
+					results_data.append({"Category": "Roads (Tiled/Paved)", "Metric": "Length", "Value": f"{tiled_roads.get('total_length_km', 0):.2f}", "Unit": "km"})
+					results_data.append({"Category": "Roads (Tiled/Paved)", "Metric": "Area", "Value": f"{tiled_roads.get('total_area_km2', 0):.4f}", "Unit": "km²"})
+					results_data.append({"Category": "Roads (Tiled/Paved)", "Metric": "Count", "Value": f"{tiled_roads.get('count', 0)}", "Unit": ""})
 					
-					# Intersection statistics
+					results_data.append({"Category": "Roads (Untiled/Unpaved)", "Metric": "Length", "Value": f"{untiled_roads.get('total_length_km', 0):.2f}", "Unit": "km"})
+					results_data.append({"Category": "Roads (Untiled/Unpaved)", "Metric": "Area", "Value": f"{untiled_roads.get('total_area_km2', 0):.4f}", "Unit": "km²"})
+					results_data.append({"Category": "Roads (Untiled/Unpaved)", "Metric": "Count", "Value": f"{untiled_roads.get('count', 0)}", "Unit": ""})
+					
 					intersections = infra_stats.get('intersections', {})
-					st.markdown("**🚦 Intersections**")
-					col1, col2 = st.columns(2)
-					with col1:
-						st.metric("Tiled Road Intersections", f"{intersections.get('tiled', 0)}")
-					with col2:
-						st.metric("Untiled Road Intersections", f"{intersections.get('untiled', 0)}")
+					results_data.append({"Category": "Intersections", "Metric": "Tiled Road Intersections", "Value": f"{intersections.get('tiled', 0)}", "Unit": ""})
+					results_data.append({"Category": "Intersections", "Metric": "Untiled Road Intersections", "Value": f"{intersections.get('untiled', 0)}", "Unit": ""})
 					
-					# Footpath statistics
 					footpath_stats = infra_stats.get('footpaths', {})
-					st.markdown("**🚶 Footpaths & Walkways**")
-					col1, col2 = st.columns(2)
-					with col1:
-						st.metric("Total Length", f"{footpath_stats.get('total_length_km', 0):.2f} km")
-					with col2:
-						st.metric("Count", f"{footpath_stats.get('count', 0)}")
+					results_data.append({"Category": "Footpaths & Walkways", "Metric": "Total Length", "Value": f"{footpath_stats.get('total_length_km', 0):.2f}", "Unit": "km"})
+					results_data.append({"Category": "Footpaths & Walkways", "Metric": "Count", "Value": f"{footpath_stats.get('count', 0)}", "Unit": ""})
 				else:
-					st.warning("No infrastructure data available")
+					results_data.append({"Category": "Infrastructure", "Metric": "Status", "Value": "No infrastructure data available", "Unit": ""})
 				
 				# People and phone tracking
-				st.markdown("---")
-				st.subheader("👥 People & Phone Tracking")
 				tracker = st.session_state["people_phone_tracker"]
 				current_stats = tracker.get_current_stats()
 				
 				if current_stats['tracking_active'] or current_stats['data_points'] > 0:
-					col1, col2, col3 = st.columns(3)
-					with col1:
-						st.metric("Status", "🟢 Active" if current_stats['tracking_active'] else "🔴 Stopped")
-					with col2:
-						st.metric("Data Points", f"{current_stats['data_points']}")
-					with col3:
-						st.metric("Tracking Time", current_stats['total_tracking_time'])
+					results_data.append({"Category": "People & Phone Tracking", "Metric": "Status", "Value": "🟢 Active" if current_stats['tracking_active'] else "🔴 Stopped", "Unit": ""})
+					results_data.append({"Category": "People & Phone Tracking", "Metric": "Data Points", "Value": f"{current_stats['data_points']}", "Unit": ""})
+					results_data.append({"Category": "People & Phone Tracking", "Metric": "Tracking Time", "Value": current_stats['total_tracking_time'], "Unit": ""})
 					
 					if current_stats['data_points'] > 0:
-						col1, col2 = st.columns(2)
-						with col1:
-							st.metric("Latest People Count", f"{current_stats['latest_people']}")
-							st.metric("Avg People (1h)", f"{current_stats['avg_people_1h']}")
-						with col2:
-							st.metric("Latest Phone Count", f"{current_stats['latest_phones']}")
-							st.metric("Avg Phones (1h)", f"{current_stats['avg_phones_1h']}")
+						results_data.append({"Category": "People & Phone Tracking", "Metric": "Latest People Count", "Value": f"{current_stats['latest_people']}", "Unit": ""})
+						results_data.append({"Category": "People & Phone Tracking", "Metric": "Avg People (1h)", "Value": f"{current_stats['avg_people_1h']}", "Unit": ""})
+						results_data.append({"Category": "People & Phone Tracking", "Metric": "Latest Phone Count", "Value": f"{current_stats['latest_phones']}", "Unit": ""})
+						results_data.append({"Category": "People & Phone Tracking", "Metric": "Avg Phones (1h)", "Value": f"{current_stats['avg_phones_1h']}", "Unit": ""})
 						
-						# Show recent data points
+						# Show recent data points in grid
 						if st.checkbox("Show Recent Data History", key="show_tracking_history"):
 							st.markdown("**Recent Data Points (15-min intervals)**")
 							history = current_stats.get('data_history', [])
 							if history:
-								for i, dp in enumerate(reversed(history[-5:])):  # Show last 5 points
+								history_data = []
+								for dp in reversed(history[-5:]):
 									time_str = dp['timestamp'].strftime("%H:%M:%S")
-									st.write(f"**{time_str}**: {dp['people_count']} people, {dp['phone_count']} phones")
+									history_data.append({
+										"Timestamp": time_str,
+										"People Count": dp['people_count'],
+										"Phone Count": dp['phone_count']
+									})
+								history_df = pd.DataFrame(history_data)
+								st.dataframe(history_df, use_container_width=True, hide_index=True)
 				else:
 					st.info("👥 People & phone tracking not started. Use the sidebar to begin tracking.")
 					st.write("*Note: This is a simulated tracking system for demonstration. In production, this would integrate with real sensors, cameras, or network analytics.*")
 				
-				# Enhanced Height Statistics Section
-				st.markdown("---")
-				st.subheader("🏗️ Building Heights (Enhanced Analysis)")
+				# Enhanced Height Statistics
 				height_stats = _saved.get('height_stats', {})
-				
 				if height_stats.get('buildings_with_height', 0) > 0:
-					# Basic height metrics
-					col1, col2 = st.columns(2)
-					with col1:
-						st.metric("Average Height", f"{height_stats['avg_height']:.1f} m")
-						st.metric("Median Height", f"{height_stats['median_height']:.1f} m")
-					with col2:
-						st.metric("Height Range", f"{height_stats['min_height']:.1f} - {height_stats['max_height']:.1f} m")
-						st.metric("Overall Confidence", f"{height_stats.get('overall_confidence', 0):.1%}")
-					
-					st.write(f"**Buildings with height data:** {height_stats['buildings_with_height']} of {_saved['num_buildings']}")
+					results_data.append({"Category": "Building Heights (Enhanced)", "Metric": "Average Height", "Value": f"{height_stats['avg_height']:.1f}", "Unit": "m"})
+					results_data.append({"Category": "Building Heights (Enhanced)", "Metric": "Median Height", "Value": f"{height_stats['median_height']:.1f}", "Unit": "m"})
+					results_data.append({"Category": "Building Heights (Enhanced)", "Metric": "Min Height", "Value": f"{height_stats['min_height']:.1f}", "Unit": "m"})
+					results_data.append({"Category": "Building Heights (Enhanced)", "Metric": "Max Height", "Value": f"{height_stats['max_height']:.1f}", "Unit": "m"})
+					results_data.append({"Category": "Building Heights (Enhanced)", "Metric": "Overall Confidence", "Value": f"{height_stats.get('overall_confidence', 0):.1%}", "Unit": ""})
+					results_data.append({"Category": "Building Heights (Enhanced)", "Metric": "Buildings with Height Data", "Value": f"{height_stats['buildings_with_height']} of {_saved['num_buildings']}", "Unit": ""})
 					
 					# Satellite data status
 					if _saved.get('satellite_enabled', False):
-						st.success("🛰️ Satellite elevation data enabled for enhanced accuracy")
+						results_data.append({"Category": "Building Heights (Enhanced)", "Metric": "Satellite Data", "Value": "🛰️ Enabled", "Unit": ""})
 					else:
-						st.info("📡 Satellite data disabled - using OSM data only")
+						results_data.append({"Category": "Building Heights (Enhanced)", "Metric": "Satellite Data", "Value": "📡 Disabled", "Unit": ""})
 					
 					# Data quality breakdown
-					st.markdown("---")
-					st.subheader("📊 Data Quality Analysis")
-					
 					quality_summary = height_stats.get('data_quality_summary', {})
 					if quality_summary:
-						col1, col2, col3 = st.columns(3)
-						with col1:
-							st.metric("High Confidence", f"{quality_summary.get('high_confidence', 0)}", help="Confidence > 70%")
-						with col2:
-							st.metric("Medium Confidence", f"{quality_summary.get('medium_confidence', 0)}", help="Confidence 40-70%")
-						with col3:
-							st.metric("Low Confidence", f"{quality_summary.get('low_confidence', 0)}", help="Confidence < 40%")
+						results_data.append({"Category": "Data Quality", "Metric": "High Confidence (>70%)", "Value": f"{quality_summary.get('high_confidence', 0)}", "Unit": ""})
+						results_data.append({"Category": "Data Quality", "Metric": "Medium Confidence (40-70%)", "Value": f"{quality_summary.get('medium_confidence', 0)}", "Unit": ""})
+						results_data.append({"Category": "Data Quality", "Metric": "Low Confidence (<40%)", "Value": f"{quality_summary.get('low_confidence', 0)}", "Unit": ""})
 					
 					# Data source distribution
 					source_dist = height_stats.get('source_distribution', {})
 					if source_dist:
-						st.write("**Data Sources:**")
 						for source, count in source_dist.items():
 							source_name = source.replace('_', ' ').title()
 							if source == "height_tag":
@@ -1373,26 +1358,34 @@ def main() -> None:
 								source_name = "Max Height Tags"
 							elif source == "satellite_elevation":
 								source_name = "Satellite Elevation Data"
-							
-							st.write(f"• {source_name}: {count} buildings")
+							results_data.append({"Category": "Data Sources", "Metric": source_name, "Value": f"{count}", "Unit": "buildings"})
 					
 					# Recommendations
 					recommendations = height_stats.get('recommendations', [])
 					if recommendations:
-						st.markdown("---")
-						st.subheader("💡 Recommendations")
-						for rec in recommendations:
-							st.info(rec)
-					
+						for i, rec in enumerate(recommendations):
+							results_data.append({"Category": "Recommendations", "Metric": f"Recommendation {i+1}", "Value": rec, "Unit": ""})
 				else:
-					st.warning("No height data available for buildings in this area")
-					st.write("Height data depends on OpenStreetMap contributors and satellite data availability")
+					results_data.append({"Category": "Building Heights (Enhanced)", "Metric": "Status", "Value": "No height data available for buildings in this area", "Unit": ""})
+					results_data.append({"Category": "Building Heights (Enhanced)", "Metric": "Note", "Value": "Height data depends on OpenStreetMap contributors and satellite data availability", "Unit": ""})
+				
+				# Create DataFrame and display in grid
+				if results_data:
+					df = pd.DataFrame(results_data)
+					st.dataframe(df, use_container_width=True, hide_index=True)
+				else:
+					st.warning("No results data available")
 				
 				with st.expander("Run metadata"):
-					st.write(f"Endpoint: {_saved.get('endpoint','')}")
-					st.write(f"Timeout: {_saved.get('timeout_s', 0)}s, Retries: {_saved.get('retries', 0)}")
-					st.write(f"Queried at (UTC): {_saved.get('timestamp','')}")
-					st.write(f"Cache hit: {_saved.get('cache_hit', False)}")
+					metadata_data = [
+						{"Field": "Endpoint", "Value": _saved.get('endpoint', '')},
+						{"Field": "Timeout", "Value": f"{_saved.get('timeout_s', 0)}s"},
+						{"Field": "Retries", "Value": f"{_saved.get('retries', 0)}"},
+						{"Field": "Queried at (UTC)", "Value": _saved.get('timestamp', '')},
+						{"Field": "Cache hit", "Value": str(_saved.get('cache_hit', False))}
+					]
+					metadata_df = pd.DataFrame(metadata_data)
+					st.dataframe(metadata_df, use_container_width=True, hide_index=True)
 				st.caption("Note: OSM is community-sourced; completeness varies by location.")
 				st.markdown("</div>", unsafe_allow_html=True)
 			with right:
@@ -1403,8 +1396,41 @@ def main() -> None:
 	# Only show this map if no results are displayed (avoid duplication)
 	if "calc" not in st.session_state or not isinstance(st.session_state["calc"], dict):
 		st.markdown("<div class='card'>", unsafe_allow_html=True)
-		m = make_map(center_lat, center_lon, radius_m_from_inputs, polygons_to_show)
-		st_folium(m, width=None, height=600, key="live_map")
+		if preview_location_resolved:
+			# Create preview map with exact location and radius circle for confirmation
+			m_preview = folium.Map(location=[center_lat, center_lon], zoom_start=14, control_scale=True)
+			# Add radius circle
+			folium.Circle(
+				location=[center_lat, center_lon],
+				radius=radius_m_from_inputs,
+				color="#1f77b4",
+				fill=True,
+				fill_opacity=0.1,
+				weight=3,
+				popup=f"Search Radius: {radius_value} {units}",
+			).add_to(m_preview)
+			# Add prominent center marker
+			folium.Marker(
+				[center_lat, center_lon],
+				icon=folium.Icon(color="red", icon="info-sign", prefix="fa"),
+				tooltip=f"Center: {center_lat:.6f}, {center_lon:.6f}",
+				popup=f"<b>Search Center</b><br>Lat: {center_lat:.6f}<br>Lon: {center_lon:.6f}<br>Radius: {radius_value} {units}"
+			).add_to(m_preview)
+			# Add any existing building polygons from previous calculations
+			for poly in polygons_to_show:
+				try:
+					folium.GeoJson(
+						data=poly.__geo_interface__,
+						style_function=lambda x: {"color": "#d62728", "weight": 1, "fillColor": "#ff9896", "fillOpacity": 0.5},
+					).add_to(m_preview)
+				except Exception:
+					pass
+			st_folium(m_preview, width=None, height=600, key="preview_map")
+			st.caption("👆 Confirm the location and radius above, then click 'Calculate' to analyze buildings in this area.")
+		else:
+			# Show default map with message
+			m_default = make_map(center_lat, center_lon, radius_m_from_inputs, polygons_to_show)
+			st_folium(m_default, width=None, height=600, key="default_map")
 		st.markdown("</div>", unsafe_allow_html=True)
 
 	st.caption("Built with Streamlit, Folium, and OpenStreetMap data.")
